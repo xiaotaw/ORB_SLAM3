@@ -27,5 +27,10 @@ echo "Configuring and building ORB_SLAM3 ..."
 
 mkdir build
 cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake 
+-DCMAKE_BUILD_TYPE=Release \
+-DPangolin_DIR=../../Others/Pangolin/install_static/lib/cmake/Pangolin \
+-DOpenCV_DIR=/usr/local/opencv-3.2.0 \
+..
+
 make -j
