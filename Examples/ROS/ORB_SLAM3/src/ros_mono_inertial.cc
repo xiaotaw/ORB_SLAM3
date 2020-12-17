@@ -28,10 +28,14 @@
 #include<ros/ros.h>
 #include<cv_bridge/cv_bridge.h>
 #include<sensor_msgs/Imu.h>
+#include<geometry_msgs/PoseStamped.h>
+#include <tf/tf.h> 
+#include <tf/transform_datatypes.h> 
 
 #include<opencv2/core/core.hpp>
 
 #include"../../../include/System.h"
+#include"../../../include/Converter.h"
 #include"../include/ImuTypes.h"
 
 using namespace std;
@@ -50,16 +54,22 @@ class ImageGrabber
 {
 public:
     ImageGrabber(ORB_SLAM3::System* pSLAM, ImuGrabber *pImuGb, const bool bClahe): mpSLAM(pSLAM), mpImuGb(pImuGb), mbClahe(bClahe){}
+    ImageGrabber(ORB_SLAM3::System* pSLAM, ImuGrabber *pImuGb, ros::Publisher* pTcwPub , const bool bClahe): mpSLAM(pSLAM), mpImuGb(pImuGb), mpTcwPub(pTcwPub), mbClahe(bClahe){}
 
     void GrabImage(const sensor_msgs::ImageConstPtr& msg);
     cv::Mat GetImage(const sensor_msgs::ImageConstPtr &img_msg);
     void SyncWithImu();
+
+    void PublishEstimatedTcw(const cv::Mat& Tcw);
 
     queue<sensor_msgs::ImageConstPtr> img0Buf;
     std::mutex mBufMutex;
    
     ORB_SLAM3::System* mpSLAM;
     ImuGrabber *mpImuGb;
+
+    ros::Publisher *mpTcwPub;
+    ros::Time m_timestamp;
 
     const bool mbClahe;
     cv::Ptr<cv::CLAHE> mClahe = cv::createCLAHE(3.0, cv::Size(8, 8));
@@ -88,11 +98,14 @@ int main(int argc, char **argv)
       bEqual = true;
   }
 
+  
+  ros::Publisher pub_Tcw = n.advertise<geometry_msgs::PoseStamped>("estimated_Tcw", 100);
+
   // Create SLAM system. It initializes all system threads and gets ready to process frames.
   ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR,true);
 
   ImuGrabber imugb;
-  ImageGrabber igb(&SLAM,&imugb,bEqual); // TODO
+  ImageGrabber igb(&SLAM,&imugb,&pub_Tcw,bEqual); // TODO
   
   // Maximum delay, 5 seconds
   ros::Subscriber sub_imu = n.subscribe("/imu", 1000, &ImuGrabber::GrabImu, &imugb); 
@@ -136,6 +149,7 @@ cv::Mat ImageGrabber::GetImage(const sensor_msgs::ImageConstPtr &img_msg)
     std::cout << "Error type" << std::endl;
     return cv_ptr->image.clone();
   }
+  m_timestamp = img_msg->header.stamp;
 }
 
 void ImageGrabber::SyncWithImu()
@@ -175,12 +189,44 @@ void ImageGrabber::SyncWithImu()
       if(mbClahe)
         mClahe->apply(im,im);
 
-      mpSLAM->TrackMonocular(im,tIm,vImuMeas);
+      cv::Mat estimated_Tcw = mpSLAM->TrackMonocular(im,tIm,vImuMeas);
+
+      PublishEstimatedTcw(estimated_Tcw);
     }
 
     std::chrono::milliseconds tSleep(1);
     std::this_thread::sleep_for(tSleep);
   }
+}
+
+
+void ImageGrabber::PublishEstimatedTcw(const cv::Mat& Tcw)
+{
+  // https://github.com/raulmur/ORB_SLAM2/issues/597
+  geometry_msgs::PoseStamped pose;
+  pose.header.frame_id = "estimated_Tcw";
+  pose.header.stamp = m_timestamp;
+
+
+  if(!Tcw.empty())
+  {
+    std::cout << "\n\n" << m_timestamp << " estimated_Tcw: \n" << Tcw << "\n\n";
+
+    tf::Transform new_transform;
+
+    cv::Mat Rcw = Tcw.rowRange(0,3).colRange(0,3); // Rotation information
+    cv::Mat tcw = Tcw.rowRange(0,3).col(3); // translation information
+    vector<float> q = ORB_SLAM3::Converter::toQuaternion(Rcw);
+    tf::Quaternion quaternion(q[0], q[1], q[2], q[3]);
+    tf::Vector3 vector3(tcw.at<float>(0, 0), tcw.at<float>(0, 1), tcw.at<float>(0, 2));
+
+    new_transform.setOrigin(vector3);
+    new_transform.setRotation(quaternion);
+    
+    tf::poseTFToMsg(new_transform, pose.pose);
+    mpTcwPub->publish(pose);
+  }
+
 }
 
 void ImuGrabber::GrabImu(const sensor_msgs::ImuConstPtr &imu_msg)
